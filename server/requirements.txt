@@ -1,0 +1,26 @@
+# WebSocket server
+websockets>=13.0
+
+# Asynchronní Redis klient (pro online status, session, group cache)
+redis>=5.0
+
+# MongoDB driver (asynchronní) – pro ukládání zpráv
+motor>=3.3
+
+# HTTP server pro asset service (nahrávání souborů)
+aiohttp>=3.9
+
+# Zpracování konfigurace z .env souboru
+python-dotenv>=1.0
+
+# Datové třídy a validace
+pydantic>=2.5
+
+# Logování (volitelné, ale doporučené)
+loguru>=0.7
+
+# Pro práci s časovými razítky (např. pro message_id)
+python-dateutil>=2.8
+
+# Pro generování unikátních ID
+ulid-py>=2.0
