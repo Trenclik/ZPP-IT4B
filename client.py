@@ -103,23 +103,34 @@ class NetworkThread(QThread):
 
 # ---------- Chat Widget (Reusable for Private & Group) ----------
 class ChatWidget(QWidget):
-    def __init__(self, conv_id, conv_name, chat_type, network, local_db, current_user):
+    def __init__(self, conv_id, conv_name, chat_type, network, local_db, current_user, raw_target=None):
         super().__init__()
-        self.conv_id = conv_id
-        self.conv_name = conv_name
+        self.conv_id = conv_id          # e.g. "group_abc123" or "priv_alice_bob"
+        self.conv_name = conv_name      # display name
         self.chat_type = chat_type      # "private" or "group"
+        self.raw_target = raw_target if raw_target else (conv_name if chat_type == "private" else None)
         self.network = network
         self.local_db = local_db
         self.current_user = current_user
         self.init_ui()
         self.load_history()
-
+    
     def init_ui(self):
         layout = QVBoxLayout()
         self.text_display = QTextBrowser()
         self.text_input = QLineEdit()
         self.send_btn = QPushButton("Send")
+        
+        # Button bar for extra actions
+        button_bar = QHBoxLayout()
+        self.leave_btn = QPushButton("Leave Group")
+        self.leave_btn.setVisible(self.chat_type == "group")
+        self.leave_btn.clicked.connect(self.leave_group)
+        button_bar.addStretch()
+        button_bar.addWidget(self.leave_btn)
+        
         layout.addWidget(self.text_display)
+        layout.addLayout(button_bar)
         layout.addWidget(self.text_input)
         layout.addWidget(self.send_btn)
         self.setLayout(layout)
@@ -141,14 +152,14 @@ class ChatWidget(QWidget):
         if self.chat_type == "private":
             self.network.send_command("send_message", {
                 "type": "private",
-                "target": self.conv_name,   # for private, conv_name is other username
+                "target": self.raw_target,   # username
                 "content": content,
                 "timestamp": timestamp
             })
-        else:
+        else:  # group
             self.network.send_command("send_message", {
                 "type": "group",
-                "target": self.conv_id,     # group_id
+                "target": self.raw_target,   # raw group_id (without "group_" prefix)
                 "content": content,
                 "timestamp": timestamp
             })
@@ -163,7 +174,14 @@ class ChatWidget(QWidget):
         rows = self.local_db.get_messages(self.conv_id)
         for sender, content, timestamp, is_outgoing in rows:
             self.append_message(sender, content, timestamp, bool(is_outgoing))
-
+            
+    def leave_group(self):
+        reply = QMessageBox.question(self, "Leave Group",
+                                    f"Are you sure you want to leave '{self.conv_name}'?",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.network.send_command("leave_group", {"group_id": self.raw_target})
+    
     def on_new_message(self, data):
         if self.chat_type == "private":
             sender = data['from']
@@ -189,52 +207,53 @@ class MainWindow(QMainWindow):
         self.chat_widgets = {}   # conv_id -> ChatWidget
         self.init_ui()
         self.load_groups()
+        self.load_private_conversations()
         self.network.message_received.connect(self.on_server_message)
 
     def init_ui(self):
         self.setWindowTitle(f"Chat - {self.username}")
         self.setGeometry(100, 100, 800, 600)
-        self.tab_widget = QTabWidget()
-        self.setCentralWidget(self.tab_widget)
 
-        # Private chats tab
-        self.private_tab = QWidget()
-        self.private_layout = QVBoxLayout()
-        self.private_tab.setLayout(self.private_layout)
-        self.tab_widget.addTab(self.private_tab, "Private Chats")
+        # Main tab widget (switches between Private Chats and Groups)
+        self.main_tabs = QTabWidget()
+        self.setCentralWidget(self.main_tabs)
 
-        # Groups tab
-        self.group_tab = QWidget()
-        self.group_layout = QVBoxLayout()
-        self.group_tab.setLayout(self.group_layout)
-        self.tab_widget.addTab(self.group_tab, "Groups")
-
-        # Buttons for new actions
+        # ----- Private Chats Container -----
+        self.private_container = QWidget()
+        self.private_layout = QVBoxLayout(self.private_container)
+        self.private_tabs = QTabWidget()          # holds individual private chats
+        self.private_layout.addWidget(self.private_tabs)
         new_private_btn = QPushButton("New Private Chat")
         new_private_btn.clicked.connect(self.new_private_chat)
         self.private_layout.addWidget(new_private_btn)
+        self.main_tabs.addTab(self.private_container, "Private Chats")
 
+        # ----- Groups Container -----
+        self.group_container = QWidget()
+        self.group_layout = QVBoxLayout(self.group_container)
+        self.group_tabs = QTabWidget()            # holds group chats
+        self.group_layout.addWidget(self.group_tabs)
         create_group_btn = QPushButton("Create Group")
         create_group_btn.clicked.connect(self.create_group)
         self.group_layout.addWidget(create_group_btn)
+        self.main_tabs.addTab(self.group_container, "Groups")
+
+    def add_chat_tab(self, conv_id, title, chat_widget, is_group=False):
+        """Add a chat widget as a new tab in the appropriate QTabWidget."""
+        if is_group:
+            tab_widget = self.group_tabs
+        else:
+            tab_widget = self.private_tabs
+        tab_widget.addTab(chat_widget, title)
+        self.chat_widgets[conv_id] = chat_widget
+        # Switch to the newly added tab so the user sees it immediately
+        tab_widget.setCurrentWidget(chat_widget)
 
     def load_groups(self):
         self.network.send_command("get_groups", {})
-
-    def add_chat_tab(self, conv_id, title, chat_widget, is_group=False):
-        parent = self.group_tab if is_group else self.private_tab
-        # Find a container (scroll area or just add directly)
-        for i in range(parent.layout().count()):
-            widget = parent.layout().itemAt(i).widget()
-            if isinstance(widget, QTabWidget):
-                tab_widget = widget
-                break
-        else:
-            tab_widget = QTabWidget()
-            parent.layout().addWidget(tab_widget)
-        tab_widget.addTab(chat_widget, title)
-        self.chat_widgets[conv_id] = chat_widget
-
+    def load_private_conversations(self):
+        self.network.send_command("get_private_conversations", {})
+        
     def new_private_chat(self):
         username, ok = QInputDialog.getText(self, "New Private Chat", "Enter username:")
         if ok and username and username != self.username:
@@ -254,28 +273,99 @@ class MainWindow(QMainWindow):
             self.network.send_command("create_group", {"name": name, "members": members})
 
     def on_server_message(self, msg):
-        # Handle unsolicited events (no 'status' key)
         if 'command' in msg:
             if msg['command'] == 'new_message':
                 data = msg['data']
                 conv_id = data['conversation_id']
+                msg_id = str(uuid.uuid4())
+                sender = data['from']
+                content = data['content']
+                timestamp = data['timestamp']
+                is_outgoing = (sender == self.username)
+
+                # Store locally
+                self.local_db.store_message(msg_id, conv_id, sender, content, timestamp, is_outgoing)
+
                 if conv_id in self.chat_widgets:
                     self.chat_widgets[conv_id].on_new_message(data)
                 else:
-                    # Automatically open chat for new conversation
                     if data['type'] == 'private':
                         other = data['from']
                         chat = ChatWidget(conv_id, other, "private",
-                                        self.network, self.local_db, self.username)
+                                        self.network, self.local_db, self.username,
+                                        raw_target=other)
                         self.add_chat_tab(conv_id, other, chat, is_group=False)
-                        chat.on_new_message(data)
                     else:  # group
-                        # Group message from unknown group – request group list
-                        self.network.send_command("get_groups", {})
+                        group_id = data['group_id']
+                        group_name = data.get('group_name', group_id)
+                        chat = ChatWidget(conv_id, group_name, "group",
+                                        self.network, self.local_db, self.username,
+                                        raw_target=group_id)
+                        self.add_chat_tab(conv_id, group_name, chat, is_group=True)
+                    self.chat_widgets[conv_id].on_new_message(data)
+            elif msg['command'] == 'new_group':
+                data = msg['data']
+                group_id = data['group_id']
+                group_name = data['name']
+                conv_id = f"group_{group_id}"
+                if conv_id not in self.chat_widgets:
+                    chat = ChatWidget(conv_id, group_name, "group",
+                                    self.network, self.local_db, self.username,
+                                    raw_target=group_id)
+                    self.add_chat_tab(conv_id, group_name, chat, is_group=True)
+            elif msg['command'] == 'member_left':
+                data = msg['data']
+                group_id = data['group_id']
+                username = data['username']
+                conv_id = f"group_{group_id}"
+                # Optionally show a notification in the chat
+                if conv_id in self.chat_widgets:
+                    chat = self.chat_widgets[conv_id]
+                    chat.append_message("System", f"{username} left the group", datetime.now().isoformat(), is_outgoing=False)
+                else:
+                    # If the group chat is not open, we might still want to update the UI later
+                    pass
+                # Optionally refresh group list to update member count (if we had that)
+                # self.load_groups()   # could be heavy, but works
+            elif msg['command'] == 'group_deleted':
+                data = msg['data']
+                group_id = data['group_id']
+                conv_id = f"group_{group_id}"
+                if conv_id in self.chat_widgets:
+                    # Close the tab
+                    widget = self.chat_widgets[conv_id]
+                    # Find which tab widget contains it and remove
+                    for i in range(self.group_tabs.count()):
+                        if self.group_tabs.widget(i) == widget:
+                            self.group_tabs.removeTab(i)
+                            break
+                    del self.chat_widgets[conv_id]
+                    QMessageBox.information(self, "Group Deleted", f"The group '{widget.conv_name}' has been deleted because the last member left.")
+            elif 'conversations' in msg:
+                conv_ids = msg['conversations']
+                for conv_id in conv_ids:
+                    self.network.send_command("get_messages", {"conversation_id": conv_id, "limit": 50})
+            elif 'conversation_id' in msg and 'messages' in msg:
+                conv_id = msg['conversation_id']
+                messages = msg['messages']
+                # Store each message locally
+                for m in messages:
+                    msg_id = str(uuid.uuid4())
+                    is_outgoing = (m['sender'] == self.username)
+                    self.local_db.store_message(msg_id, conv_id, m['sender'], m['content'], m['timestamp'], is_outgoing)
+                # Create chat tab if it doesn't exist yet
+                if conv_id not in self.chat_widgets:
+                    if conv_id.startswith("priv_"):
+                        parts = conv_id.split('_')
+                        other = parts[2] if parts[1] == self.username else parts[1]
+                        chat = ChatWidget(conv_id, other, "private",
+                                        self.network, self.local_db, self.username,
+                                        raw_target=other)
+                        self.add_chat_tab(conv_id, other, chat, is_group=False)
             return
 
-        # Handle responses (always contain 'status')
         if 'status' not in msg:
+            print("DEBUG: Unexpected message without command or status:", msg)
             return
 
         if msg['status'] == 'ok':
@@ -283,16 +373,45 @@ class MainWindow(QMainWindow):
             if 'groups' in msg:
                 groups = msg['groups']
                 for grp in groups:
-                    conv_id = f"group_{grp['group_id']}"
+                    group_id = grp['group_id']
+                    group_name = grp['name']
+                    conv_id = f"group_{group_id}"
                     if conv_id not in self.chat_widgets:
-                        chat = ChatWidget(conv_id, grp['name'], "group",
-                                        self.network, self.local_db, self.username)
-                        self.add_chat_tab(conv_id, grp['name'], chat, is_group=True)
-            # Response to get_messages (if you implement history loading)
+                        chat = ChatWidget(conv_id, group_name, "group",
+                                        self.network, self.local_db, self.username,
+                                        raw_target=group_id)
+                        self.add_chat_tab(conv_id, group_name, chat, is_group=True)
+            elif 'deleted' in msg:   # response from leave_group
+                group_id = msg['group_id']
+                conv_id = f"group_{group_id}"
+                if msg['deleted']:
+                    # Group was deleted
+                    if conv_id in self.chat_widgets:
+                        widget = self.chat_widgets[conv_id]
+                        for i in range(self.group_tabs.count()):
+                            if self.group_tabs.widget(i) == widget:
+                                self.group_tabs.removeTab(i)
+                                break
+                        del self.chat_widgets[conv_id]
+                    QMessageBox.information(self, "Group Deleted", "The group has been deleted because you were the last member.")
+                else:
+                    # Successfully left, group still exists
+                    if conv_id in self.chat_widgets:
+                        # Close the tab
+                        widget = self.chat_widgets[conv_id]
+                        for i in range(self.group_tabs.count()):
+                            if self.group_tabs.widget(i) == widget:
+                                self.group_tabs.removeTab(i)
+                                break
+                        del self.chat_widgets[conv_id]
+                    QMessageBox.information(self, "Left Group", f"You have left the group.")
+            # Response to get_messages (if implemented)
             elif 'messages' in msg:
-                # Handle history if needed
+                # Handle message history if needed
                 pass
-            # Other generic OK responses can be ignored or logged
+            # For any other 'ok' response do nothing
+            else:
+                pass
         else:
             # Error response
             QMessageBox.warning(self, "Error", msg.get('message', 'Unknown error'))

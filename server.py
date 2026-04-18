@@ -124,6 +124,21 @@ class ClientHandler:
         for member in members:
             redis_client.sadd(f"group_members:{group_id}", member)
             redis_client.sadd(f"user_groups:{member}", group_id)
+        # Notify all members (including creator) about the new group
+        for member in members:
+            user_data = redis_client.hgetall(f"user:{member}")
+            if user_data:
+                member_id = user_data['user_id']
+                with self.server.lock:
+                    member_handler = self.server.active_users.get(member_id)
+                if member_handler:
+                    member_handler.send({
+                        "command": "new_group",
+                        "data": {
+                            "group_id": group_id,
+                            "name": group_name
+                        }
+                    })
         self.send({"status": "ok", "group_id": group_id, "group_name": group_name})
 
     def do_add_member(self, data):
@@ -139,14 +154,13 @@ class ClientHandler:
 
     # ---------- Messaging Commands ----------
     def do_send_message(self, data):
-        msg_type = data['type']          # "private" or "group"
-        target = data['target']          # username for private, group_id for group
+        msg_type = data['type']
+        target = data['target']
         content = data['content']
         sender = self.username
         timestamp = data.get('timestamp', None)
         if msg_type == "private":
             conv_id = f"priv_{'_'.join(sorted([sender, target]))}"
-            # Store in MongoDB
             msg_doc = {
                 "conversation_id": conv_id,
                 "sender": sender,
@@ -154,7 +168,8 @@ class ClientHandler:
                 "timestamp": timestamp,
                 "type": "private"
             }
-            messages_col.insert_one(msg_doc)
+            result = messages_col.insert_one(msg_doc)
+            msg_id = str(result.inserted_id)
             # Forward to recipient if online
             recipient_user_data = redis_client.hgetall(f"user:{target}")
             if recipient_user_data:
@@ -165,6 +180,7 @@ class ClientHandler:
                     recipient_handler.send({
                         "command": "new_message",
                         "data": {
+                            "message_id": msg_id,
                             "type": "private",
                             "from": sender,
                             "content": content,
@@ -174,7 +190,6 @@ class ClientHandler:
                     })
         else:  # group
             conv_id = f"group_{target}"
-            # Store in MongoDB
             msg_doc = {
                 "conversation_id": conv_id,
                 "sender": sender,
@@ -182,9 +197,12 @@ class ClientHandler:
                 "timestamp": timestamp,
                 "type": "group"
             }
-            messages_col.insert_one(msg_doc)
+            result = messages_col.insert_one(msg_doc)
+            msg_id = str(result.inserted_id)
             # Forward to all online group members
             members = redis_client.smembers(f"group_members:{target}")
+            group_info = redis_client.hgetall(f"group:{target}")
+            group_name = group_info.get('name', target)
             for member in members:
                 if member == sender:
                     continue
@@ -197,8 +215,10 @@ class ClientHandler:
                         member_handler.send({
                             "command": "new_message",
                             "data": {
+                                "message_id": msg_id,
                                 "type": "group",
                                 "group_id": target,
+                                "group_name": group_name,
                                 "from": sender,
                                 "content": content,
                                 "timestamp": timestamp,
@@ -218,12 +238,13 @@ class ClientHandler:
         messages = []
         for doc in cursor:
             messages.append({
+                "message_id": str(doc["_id"]),
                 "sender": doc["sender"],
                 "content": doc["content"],
                 "timestamp": doc["timestamp"],
                 "type": doc["type"]
             })
-        self.send({"status": "ok", "messages": list(reversed(messages))})
+        self.send({"status": "ok", "conversation_id": conv_id, "messages": list(reversed(messages))})
 
     def do_get_groups(self, data):
         groups = []
@@ -236,6 +257,68 @@ class ClientHandler:
                     "name": group_info["name"]
                 })
         self.send({"status": "ok", "groups": groups})
+    
+    def do_get_private_conversations(self, data):
+        username = self.username
+        regex = f"^priv_.*{re.escape(username)}.*"
+        cursor = messages_col.aggregate([
+            {"$match": {"type": "private", "conversation_id": {"$regex": regex}}},
+            {"$group": {"_id": "$conversation_id"}}
+        ])
+        conv_ids = [doc["_id"] for doc in cursor]
+        self.send({"status": "ok", "conversations": conv_ids})
+        
+    def do_leave_group(self, data):
+        group_id = data['group_id']
+        username = self.username
+
+        # Check if user is a member
+        if not redis_client.sismember(f"group_members:{group_id}", username):
+            self.send({"status": "error", "message": "You are not a member of this group"})
+            return
+
+        # Remove user from group members
+        redis_client.srem(f"group_members:{group_id}", username)
+        redis_client.srem(f"user_groups:{username}", group_id)
+
+        # Check if group is empty
+        remaining_members = redis_client.scard(f"group_members:{group_id}")
+        if remaining_members == 0:
+            # Delete group metadata
+            redis_client.delete(f"group:{group_id}")
+            redis_client.delete(f"group_members:{group_id}")
+            self.send({"status": "ok", "deleted": True, "group_id": group_id})
+        else:
+            # Notify other members (optional, for real-time update)
+            group_info = redis_client.hgetall(f"group:{group_id}")
+            group_name = group_info.get('name', '')
+            members = redis_client.smembers(f"group_members:{group_id}")
+            for member in members:
+                user_data = redis_client.hgetall(f"user:{member}")
+                if user_data:
+                    member_id = user_data['user_id']
+                    with self.server.lock:
+                        member_handler = self.server.active_users.get(member_id)
+                    if member_handler:
+                        member_handler.send({
+                            "command": "member_left",
+                            "data": {
+                                "group_id": group_id,
+                                "group_name": group_name,
+                                "username": username
+                            }
+                        })
+            self.send({"status": "ok", "deleted": False, "group_id": group_id})
+    def do_get_private_conversations(self, data):
+        username = self.username
+        # Find all private conversation IDs involving this user
+        # Because conversation_id is "priv_user1_user2", we can use regex
+        regex = f"priv_.*{username}.*"
+        cursor = messages_col.find(
+            {"type": "private", "conversation_id": {"$regex": regex}}
+        ).distinct("conversation_id")
+        conv_ids = list(cursor)
+        self.send({"status": "ok", "conversations": conv_ids})
 
 if __name__ == "__main__":
     server = ChatServer()
