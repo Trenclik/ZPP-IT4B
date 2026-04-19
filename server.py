@@ -10,7 +10,7 @@ import re
 from pymongo import MongoClient
 
 # ---------- Constants ----------
-HOST = '127.0.0.1'
+HOST = '0.0.0.0'
 PORT = 5555
 
 # ---------- Database Setup ----------
@@ -236,8 +236,9 @@ class ClientHandler:
         timestamp = data.get('timestamp', None)
         sender_id = self.user_id
         sender_username = self.username
+
         if msg_type == "private":
-            conv_id = f"priv_{'_'.join(sorted([sender, target]))}"
+            conv_id = f"priv_{'_'.join(sorted([sender_username, target]))}"
             msg_doc = {
                 "conversation_id": conv_id,
                 "sender_id": sender_id,
@@ -247,9 +248,9 @@ class ClientHandler:
                 "type": "private"
             }
             result = messages_col.insert_one(msg_doc)
-            msg_id = str(result.inserted_id)          # <-- define msg_id first
-            
-            # Send acknowledgment to sender
+            msg_id = str(result.inserted_id)
+
+            # Send ACK to sender
             self.send({
                 "command": "message_ack",
                 "data": {
@@ -258,7 +259,7 @@ class ClientHandler:
                     "status": "delivered"
                 }
             })
-            
+
             # Forward to recipient if online
             recipient_user_data = redis_client.hgetall(f"user:{target}")
             if recipient_user_data:
@@ -278,20 +279,21 @@ class ClientHandler:
                             "conversation_id": conv_id
                         }
                     })
-                    
+
         else:  # group
             conv_id = f"group_{target}"
             msg_doc = {
                 "conversation_id": conv_id,
-                "sender": sender,
+                "sender_id": sender_id,
+                "sender_username": sender_username,
                 "content": content,
                 "timestamp": timestamp,
                 "type": "group"
             }
             result = messages_col.insert_one(msg_doc)
-            msg_id = str(result.inserted_id)          # <-- define msg_id first
-            
-            # Send acknowledgment to sender
+            msg_id = str(result.inserted_id)
+
+            # Send ACK to sender
             self.send({
                 "command": "message_ack",
                 "data": {
@@ -300,13 +302,13 @@ class ClientHandler:
                     "status": "delivered"
                 }
             })
-            
+
             # Forward to all online group members
             members = redis_client.smembers(f"group_members:{target}")
             group_info = redis_client.hgetall(f"group:{target}")
             group_name = group_info.get('name', target)
             for member in members:
-                if member == sender:
+                if member == sender_username:
                     continue
                 user_data = redis_client.hgetall(f"user:{member}")
                 if user_data:
@@ -321,14 +323,15 @@ class ClientHandler:
                                 "type": "group",
                                 "group_id": target,
                                 "group_name": group_name,
-                                "from": sender,
+                                "from_id": sender_id,
+                                "from_username": sender_username,
                                 "content": content,
                                 "timestamp": timestamp,
                                 "conversation_id": conv_id
                             }
                         })
-        
-        # Optional final OK (client ignores it, but harmless)
+
+        # Optional final OK (client ignores it)
         self.send({"status": "ok"})
     def do_get_messages(self, data):
         conv_id = data['conversation_id']

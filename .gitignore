@@ -4,3 +4,5 @@ lib/
 lib64
 pyvenv.cfg
 __pycache__/
+*.db
+test.py
