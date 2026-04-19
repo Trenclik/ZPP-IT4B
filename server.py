@@ -18,7 +18,6 @@ redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
 mongo_client = MongoClient('mongodb://localhost:27017/')
 db = mongo_client.chatdb
 messages_col = db.messages
-# Create index for fast history retrieval and sharding (shard key = conversation_id)
 messages_col.create_index([('conversation_id', 1), ('timestamp', 1)])
 
 # ---------- Helper Functions ----------
@@ -30,18 +29,18 @@ def check_password(pw: str, hashed: str) -> bool:
 
 def generate_unique_tag(base_username):
     # Generate random 4-digit tag, ensure not already used
-    for _ in range(10):  # try up to 10 times
+    for _ in range(10):
         tag = f"#{random.randint(0, 9999):04d}"
         full = f"{base_username}{tag}"
         if not redis_client.exists(f"user:{full}"):
             return full
-    # fallback to a timestamp-based tag
+    # fallback timestamp tag
     return f"{base_username}#{int(time.time()) % 10000:04d}"
 # ---------- Server Core ----------
 class ChatServer:
     def __init__(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.active_users = {}          # user_id -> client_handler
+        self.active_users = {}
         self.lock = threading.Lock()
 
     def start(self):
@@ -50,7 +49,7 @@ class ChatServer:
         print(f"Server listening on {HOST}:{PORT}")
         while True:
             client_sock, addr = self.server_socket.accept()
-            print(f"New connection from {addr}")
+            print(f"New conn {addr}")
             handler = ClientHandler(client_sock, self)
             threading.Thread(target=handler.run, daemon=True).start()
 
@@ -89,13 +88,12 @@ class ClientHandler:
     # ---------- Account Commands ----------
     def do_register(self, data):
         base_username = data['username']
-        # Check if base name is taken? Not necessary; we allow duplicates with different tags.
         full_username = generate_unique_tag(base_username)
         user_id = str(uuid.uuid4())
         redis_client.hset(f"user:{full_username}", mapping={
             "user_id": user_id,
             "password": hash_password(data['password']),
-            "base_username": base_username   # store base for display
+            "base_username": base_username
         })
         self.send({"status": "ok", "user_id": user_id, "full_username": full_username})
 
@@ -128,22 +126,13 @@ class ClientHandler:
         username = self.username
         user_id = self.user_id
 
-        # --- NEW: Update all messages sent by this user to include sender_id ---
         messages_col.update_many(
             {"sender": username, "sender_id": {"$exists": False}},
             {"$set": {"sender_id": user_id}}
         )
-        # Also optionally rename sender → sender_username for consistency
-        messages_col.update_many(
-            {"sender": username},
-            {"$rename": {"sender": "sender_username"}}
-        )
-        # Get all groups the user is in
         group_ids = redis_client.smembers(f"user_groups:{username}")
         for group_id in group_ids:
-            # Remove user from group members
             redis_client.srem(f"group_members:{group_id}", username)
-            # Notify remaining online members (excluding the deleted user)
             remaining_members = redis_client.smembers(f"group_members:{group_id}")
             group_info = redis_client.hgetall(f"group:{group_id}")
             group_name = group_info.get('name', '')
@@ -162,15 +151,13 @@ class ClientHandler:
                                 "username": username
                             }
                         })
-            # Remove group from user's own list
             redis_client.srem(f"user_groups:{username}", group_id)
-            # If group becomes empty, delete it
+            # delete group if empty
             if redis_client.scard(f"group_members:{group_id}") == 0:
                 redis_client.delete(f"group:{group_id}")
                 redis_client.delete(f"group_members:{group_id}")
-        # Delete the user account
+        # delete user from redis and logout 
         redis_client.delete(f"user:{username}")
-        # Send response, then disconnect
         self.send({"status": "ok"})
         self.logout()
         self.sock.close()
@@ -179,23 +166,21 @@ class ClientHandler:
     def do_create_group(self, data):
         group_name = data['name']
         members = set(data.get('members', [])) | {self.username}
-        # Validate all members exist
+        # check if members exist
         for member in members:
             if not redis_client.exists(f"user:{member}"):
                 self.send({"status": "error", "message": f"User {member} does not exist"})
                 return
         members = set(data.get('members', [])) | {self.username}
         group_id = str(uuid.uuid4())
-        # Store group metadata
         redis_client.hset(f"group:{group_id}", mapping={
             "name": group_name,
             "creator": self.username
         })
-        # Add members
         for member in members:
             redis_client.sadd(f"group_members:{group_id}", member)
             redis_client.sadd(f"user_groups:{member}", group_id)
-        # Notify all members (including creator) about the new group
+        # notify everyone in group
         for member in members:
             user_data = redis_client.hgetall(f"user:{member}")
             if user_data:
@@ -215,7 +200,7 @@ class ClientHandler:
     def do_add_member(self, data):
         group_id = data['group_id']
         new_member = data['username']
-        # Check if group exists
+        # check if group exists
         if not redis_client.exists(f"group:{group_id}"):
             self.send({"status": "error", "message": "Group not found"})
             return
@@ -250,7 +235,7 @@ class ClientHandler:
             result = messages_col.insert_one(msg_doc)
             msg_id = str(result.inserted_id)
 
-            # Send ACK to sender
+            # check if message arrived
             self.send({
                 "command": "message_ack",
                 "data": {
@@ -260,7 +245,7 @@ class ClientHandler:
                 }
             })
 
-            # Forward to recipient if online
+            # only send if online
             recipient_user_data = redis_client.hgetall(f"user:{target}")
             if recipient_user_data:
                 recipient_id = recipient_user_data['user_id']
@@ -281,6 +266,7 @@ class ClientHandler:
                     })
 
         else:  # group
+            # mostly same as PM
             conv_id = f"group_{target}"
             msg_doc = {
                 "conversation_id": conv_id,
@@ -293,7 +279,6 @@ class ClientHandler:
             result = messages_col.insert_one(msg_doc)
             msg_id = str(result.inserted_id)
 
-            # Send ACK to sender
             self.send({
                 "command": "message_ack",
                 "data": {
@@ -303,7 +288,6 @@ class ClientHandler:
                 }
             })
 
-            # Forward to all online group members
             members = redis_client.smembers(f"group_members:{target}")
             group_info = redis_client.hgetall(f"group:{target}")
             group_name = group_info.get('name', target)
@@ -331,8 +315,6 @@ class ClientHandler:
                             }
                         })
 
-        # Optional final OK (client ignores it)
-        self.send({"status": "ok"})
     def do_get_messages(self, data):
         conv_id = data['conversation_id']
         limit = data.get('limit', 50)
@@ -379,24 +361,22 @@ class ClientHandler:
         group_id = data['group_id']
         username = self.username
 
-        # Check if user is a member
         if not redis_client.sismember(f"group_members:{group_id}", username):
             self.send({"status": "error", "message": "You are not a member of this group"})
             return
 
-        # Remove user from group members
+        # delete from redis
         redis_client.srem(f"group_members:{group_id}", username)
         redis_client.srem(f"user_groups:{username}", group_id)
 
-        # Check if group is empty
+        # delete group if empty
         remaining_members = redis_client.scard(f"group_members:{group_id}")
         if remaining_members == 0:
-            # Delete group metadata
             redis_client.delete(f"group:{group_id}")
             redis_client.delete(f"group_members:{group_id}")
             self.send({"status": "ok", "deleted": True, "group_id": group_id})
         else:
-            # Notify other members (optional, for real-time update)
+            # notify everyone in group
             group_info = redis_client.hgetall(f"group:{group_id}")
             group_name = group_info.get('name', '')
             members = redis_client.smembers(f"group_members:{group_id}")

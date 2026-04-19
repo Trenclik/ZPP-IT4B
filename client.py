@@ -9,14 +9,15 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor, QAction
 
 # ---------- Constants ----------
-SERVER_HOST = '127.0.0.1'
+SERVER_HOST = '127.0.0.1' # lo
 SERVER_PORT = 5555
 
-# ---------- Database (SQLite) ----------
+# -------------------------------
 class LocalDB:
     def __init__(self, username):
         self.conn = sqlite3.connect(f"{username}_chat.db")
         self.cursor = self.conn.cursor()
+        # not a fallback DO NOT DELETE
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
@@ -56,7 +57,7 @@ class NetworkThread(QThread):
 
     def __init__(self):
         super().__init__()
-        self.sock = None
+        self.sock = None # will be socket
         self.running = False
 
     def connect_to_server(self):
@@ -70,7 +71,7 @@ class NetworkThread(QThread):
             self.error.emit(str(e))
 
     def send_command(self, command, data):
-        if self.sock is None:          # <-- add this check
+        if self.sock is None:
             self.error.emit("Not connected to server")
             return
         try:
@@ -80,6 +81,7 @@ class NetworkThread(QThread):
             self.error.emit(f"Send failed: {e}")
 
     def run(self):
+        # for keeping socket alive
         buffer = ""
         while self.running:
             try:
@@ -95,7 +97,7 @@ class NetworkThread(QThread):
                         self.message_received.emit(json.loads(line))
             except:
                 break
-        self.running = False
+        self.running = False # outside loop bc of theading
         self.disconnected.emit()
 
     def stop(self):
@@ -103,13 +105,13 @@ class NetworkThread(QThread):
         if self.sock:
             self.sock.close()
 
-# ---------- Chat Widget (Reusable for Private & Group) ----------
+# ---------- Chat Widget ----------
 class ChatWidget(QWidget):
     def __init__(self, conv_id, conv_name, chat_type, network, local_db, current_user, raw_target=None):
         super().__init__()
-        self.conv_id = conv_id          # e.g. "group_abc123" or "priv_alice_bob"
-        self.conv_name = conv_name      # display name
-        self.chat_type = chat_type      # "private" or "group"
+        self.conv_id = conv_id
+        self.conv_name = conv_name
+        self.chat_type = chat_type # "private" or "group"
         self.raw_target = raw_target if raw_target else (conv_name if chat_type == "private" else None)
         self.network = network
         self.local_db = local_db
@@ -123,7 +125,6 @@ class ChatWidget(QWidget):
         self.text_input = QLineEdit()
         self.send_btn = QPushButton("Send")
         
-        # Button bar for extra actions
         button_bar = QHBoxLayout()
         self.leave_btn = QPushButton("Leave Group")
         self.leave_btn.setVisible(self.chat_type == "group")
@@ -161,13 +162,14 @@ class ChatWidget(QWidget):
         else:  # group
             self.network.send_command("send_message", {
                 "type": "group",
-                "target": self.raw_target,   # raw group_id (without "group_" prefix)
+                "target": self.raw_target,   # target WO "group_" pref
                 "content": content,
                 "timestamp": timestamp
             })
         self.text_input.clear()
 
     def append_message(self, sender, content, timestamp, is_outgoing=False):
+        # eye candy
         prefix = "You: " if is_outgoing else f"{sender}: "
         self.text_display.append(f"[{timestamp[:19]}] {prefix}{content}")
         self.text_display.moveCursor(QTextCursor.MoveOperation.End)
@@ -186,14 +188,14 @@ class ChatWidget(QWidget):
     
     def on_new_message(self, data):
         if self.chat_type == "private":
-            sender = data['from_username']   # was 'from'
+            sender = data['from_username']
             content = data['content']
             timestamp = data['timestamp']
         else:  # group
-            sender = data['from_username']   # was 'from'
+            sender = data['from_username']
             content = data['content']
             timestamp = data['timestamp']
-        # Store locally
+
         msg_id = str(uuid.uuid4())
         self.local_db.store_message(msg_id, self.conv_id, sender, content, timestamp, 0)
         self.append_message(sender, content, timestamp, False)
@@ -206,7 +208,7 @@ class MainWindow(QMainWindow):
         self.user_id = user_id
         self.network = network
         self.local_db = local_db
-        self.chat_widgets = {}   # conv_id -> ChatWidget
+        self.chat_widgets = {}
         self.init_ui()
         self.load_groups()
         self.load_private_conversations()
@@ -225,24 +227,23 @@ class MainWindow(QMainWindow):
         account_menu.addAction(logout_action)
         account_menu.addAction(delete_action)
         
-        # Main tab widget (switches between Private Chats and Groups)
-        self.main_tabs = QTabWidget()
+        self.main_tabs = QTabWidget() # PM or group
         self.setCentralWidget(self.main_tabs)
 
-        # ----- Private Chats Container -----
+        # PM
         self.private_container = QWidget()
         self.private_layout = QVBoxLayout(self.private_container)
-        self.private_tabs = QTabWidget()          # holds individual private chats
+        self.private_tabs = QTabWidget()
         self.private_layout.addWidget(self.private_tabs)
         new_private_btn = QPushButton("New Private Chat")
         new_private_btn.clicked.connect(self.new_private_chat)
         self.private_layout.addWidget(new_private_btn)
         self.main_tabs.addTab(self.private_container, "Private Chats")
 
-        # ----- Groups Container -----
+        # group
         self.group_container = QWidget()
         self.group_layout = QVBoxLayout(self.group_container)
-        self.group_tabs = QTabWidget()            # holds group chats
+        self.group_tabs = QTabWidget()
         self.group_layout.addWidget(self.group_tabs)
         create_group_btn = QPushButton("Create Group")
         create_group_btn.clicked.connect(self.create_group)
@@ -250,14 +251,12 @@ class MainWindow(QMainWindow):
         self.main_tabs.addTab(self.group_container, "Groups")
 
     def add_chat_tab(self, conv_id, title, chat_widget, is_group=False):
-        """Add a chat widget as a new tab in the appropriate QTabWidget."""
         if is_group:
             tab_widget = self.group_tabs
         else:
             tab_widget = self.private_tabs
         tab_widget.addTab(chat_widget, title)
         self.chat_widgets[conv_id] = chat_widget
-        # Switch to the newly added tab so the user sees it immediately
         tab_widget.setCurrentWidget(chat_widget)
 
     def load_groups(self):
@@ -286,25 +285,23 @@ class MainWindow(QMainWindow):
             self.network.send_command("create_group", {"name": name, "members": members})
 
     def on_server_message(self, msg):
-        # 1. Handle unsolicited events (no 'status' key)
         if 'command' in msg:
             if msg['command'] == 'new_message':
                 data = msg['data']
                 conv_id = data['conversation_id']
                 msg_id = data['message_id']
-                sender = data['from_username']      # was 'from'
+                sender = data['from_username']
                 content = data['content']
                 timestamp = data['timestamp']
                 is_outgoing = (sender == self.username)
 
-                # Store locally using server-provided ID
                 self.local_db.store_message(msg_id, conv_id, sender, content, timestamp, is_outgoing)
 
                 if conv_id in self.chat_widgets:
                     self.chat_widgets[conv_id].on_new_message(data)
                 else:
                     if data['type'] == 'private':
-                        other = data['from_username']   # was 'from'
+                        other = data['from_username']
                         chat = ChatWidget(conv_id, other, "private",
                                         self.network, self.local_db, self.username,
                                         raw_target=other)
@@ -318,6 +315,7 @@ class MainWindow(QMainWindow):
                                         raw_target=group_id)
                         self.add_chat_tab(conv_id, group_name, chat, is_group=True)
                     self.chat_widgets[conv_id].on_new_message(data)
+
             elif msg['command'] == 'new_group':
                 data = msg['data']
                 group_id = data['group_id']
@@ -328,6 +326,7 @@ class MainWindow(QMainWindow):
                                     self.network, self.local_db, self.username,
                                     raw_target=group_id)
                     self.add_chat_tab(conv_id, group_name, chat, is_group=True)
+
             elif msg['command'] == 'member_left':
                 data = msg['data']
                 group_id = data['group_id']
@@ -336,10 +335,12 @@ class MainWindow(QMainWindow):
                 if conv_id in self.chat_widgets:
                     chat = self.chat_widgets[conv_id]
                     chat.append_message("System", f"{username} left the group", datetime.now().isoformat(), is_outgoing=False)
+
             elif msg['command'] == 'message_ack':
                 data = msg['data']
                 msg_id = data['message_id']
                 print(f"Message {msg_id} delivered to server")
+
             elif 'exists' in msg:
                 if msg['exists']:
                     username = self.pending_private_chat
@@ -354,15 +355,15 @@ class MainWindow(QMainWindow):
                 else:
                     QMessageBox.warning(self, "Error", f"User '{self.pending_private_chat}' does not exist.")
                 self.pending_private_chat = None
+
             return
 
-        # 2. Handle responses (contain 'status')
         if 'status' not in msg:
             print("DEBUG: Unexpected message without command or status:", msg)
             return
 
         if msg['status'] == 'ok':
-            # Response to get_groups
+            # get_groups resp
             if 'groups' in msg:
                 groups = msg['groups']
                 for grp in groups:
@@ -375,13 +376,13 @@ class MainWindow(QMainWindow):
                                         raw_target=group_id)
                         self.add_chat_tab(conv_id, group_name, chat, is_group=True)
 
-            # Response to get_private_conversations
+            # get_private_conversations resp
             elif 'conversations' in msg:
                 conv_ids = msg['conversations']
                 for conv_id in conv_ids:
                     self.network.send_command("get_messages", {"conversation_id": conv_id, "limit": 50})
 
-            # Response to get_messages
+            # get_messages resp
             elif 'conversation_id' in msg and 'messages' in msg:
                 conv_id = msg['conversation_id']
                 messages = msg['messages']
@@ -390,7 +391,7 @@ class MainWindow(QMainWindow):
                     sender = m.get('sender_username', m.get('sender', 'unknown'))
                     is_outgoing = (sender == self.username)
                     self.local_db.store_message(msg_id, conv_id, sender, m['content'], m['timestamp'], is_outgoing)
-                # Create chat tab if it doesn't exist yet (only for private)
+                # new tab if not existing
                 if conv_id not in self.chat_widgets and conv_id.startswith("priv_"):
                     parts = conv_id.split('_')
                     other = parts[2] if parts[1] == self.username else parts[1]
@@ -399,7 +400,7 @@ class MainWindow(QMainWindow):
                                     raw_target=other)
                     self.add_chat_tab(conv_id, other, chat, is_group=False)
 
-            # Response to leave_group (optional, you can add handling)
+            # leave_group resp
             elif 'deleted' in msg:
                 group_id = msg['group_id']
                 conv_id = f"group_{group_id}"
@@ -415,26 +416,23 @@ class MainWindow(QMainWindow):
                 else:
                     QMessageBox.information(self, "Left Group", "You have left the group.")
 
-            # Ignore other OK responses (like create_group, send_message)
+            # ignore rest
             else:
-                pass   # no error popup
+                pass
 
         else:
-            # Error response
             QMessageBox.warning(self, "Error", msg.get('message', 'Unknown error'))
     
     def logout(self):
         self.network.send_command("logout", {})
         self.network.stop()
         self.close()
-        # Show login dialog again
         self.login_dialog = LoginDialog()
         self.login_dialog.show()
         
     def on_disconnected(self):
         QMessageBox.information(self, "Disconnected", "You have been logged out.")
         self.close()
-        # Reopen login
         self.login_dialog = LoginDialog()
         self.login_dialog.show()
         
@@ -444,6 +442,7 @@ class MainWindow(QMainWindow):
                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             self.network.send_command("delete_account", {})
+
 # ---------- Login / Register Dialog ----------
 class LoginDialog(QDialog):
     def __init__(self):
@@ -473,8 +472,8 @@ class LoginDialog(QDialog):
         layout.addWidget(self.register_btn)
         self.setLayout(layout)
 
-        self.login_btn.clicked.connect(self.login)
-        self.register_btn.clicked.connect(self.register)
+        self.login_btn.clicked.connect(self.try_login)
+        self.register_btn.clicked.connect(self.try_register)
         self.login_btn.setEnabled(False)
         self.register_btn.setEnabled(False)
 
@@ -487,7 +486,7 @@ class LoginDialog(QDialog):
         self.login_btn.setEnabled(False)
         self.register_btn.setEnabled(False)
 
-    def on_server_response(self, resp):
+    def on_server_response(self, resp): # after attempt
         if not self.waiting_for_response:
             return
         self.waiting_for_response = False
@@ -508,7 +507,7 @@ class LoginDialog(QDialog):
         else:
             QMessageBox.warning(self, "Error", resp.get('message', 'Unknown error'))
 
-    def login(self):
+    def try_login(self):
         if self.waiting_for_response:
             return
         self.pending_action = 'login'
@@ -518,7 +517,7 @@ class LoginDialog(QDialog):
             "password": self.password_edit.text()
         })
 
-    def register(self):
+    def try_register(self):
         if self.waiting_for_response:
             return
         self.pending_action = 'register'
