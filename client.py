@@ -387,9 +387,10 @@ class MainWindow(QMainWindow):
                 messages = msg['messages']
                 for m in messages:
                     msg_id = m['message_id']
-                    is_outgoing = (m['sender'] == self.username)
-                    self.local_db.store_message(msg_id, conv_id, m['sender'], m['content'], m['timestamp'], is_outgoing)
-                # Create chat tab if it doesn't exist yet (only for private, groups are already handled)
+                    sender = m.get('sender_username', m.get('sender', 'unknown'))
+                    is_outgoing = (sender == self.username)
+                    self.local_db.store_message(msg_id, conv_id, sender, m['content'], m['timestamp'], is_outgoing)
+                # Create chat tab if it doesn't exist yet (only for private)
                 if conv_id not in self.chat_widgets and conv_id.startswith("priv_"):
                     parts = conv_id.split('_')
                     other = parts[2] if parts[1] == self.username else parts[1]
