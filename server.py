@@ -1,8 +1,10 @@
 import socket
 import threading
+import time
 import json
 import uuid
 import bcrypt
+import random
 import redis
 import re
 from pymongo import MongoClient
@@ -26,6 +28,15 @@ def hash_password(pw: str) -> str:
 def check_password(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
+def generate_unique_tag(base_username):
+    # Generate random 4-digit tag, ensure not already used
+    for _ in range(10):  # try up to 10 times
+        tag = f"#{random.randint(0, 9999):04d}"
+        full = f"{base_username}{tag}"
+        if not redis_client.exists(f"user:{full}"):
+            return full
+    # fallback to a timestamp-based tag
+    return f"{base_username}#{int(time.time()) % 10000:04d}"
 # ---------- Server Core ----------
 class ChatServer:
     def __init__(self):
@@ -77,17 +88,16 @@ class ClientHandler:
 
     # ---------- Account Commands ----------
     def do_register(self, data):
-        username = data['username']
-        password = data['password']
-        if redis_client.exists(f"user:{username}"):
-            self.send({"status": "error", "message": "Username already exists"})
-            return
+        base_username = data['username']
+        # Check if base name is taken? Not necessary; we allow duplicates with different tags.
+        full_username = generate_unique_tag(base_username)
         user_id = str(uuid.uuid4())
-        redis_client.hset(f"user:{username}", mapping={
+        redis_client.hset(f"user:{full_username}", mapping={
             "user_id": user_id,
-            "password": hash_password(password)
+            "password": hash_password(data['password']),
+            "base_username": base_username   # store base for display
         })
-        self.send({"status": "ok", "user_id": user_id})
+        self.send({"status": "ok", "user_id": user_id, "full_username": full_username})
 
     def do_login(self, data):
         username = data['username']

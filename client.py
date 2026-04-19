@@ -502,7 +502,9 @@ class LoginDialog(QDialog):
                 )
                 self.main_window.show()
             else:  # register
-                QMessageBox.information(self, "Success", "Registration successful. You can now login.")
+                full_username = resp.get('full_username')
+                self.username_edit.setText(full_username)
+                QMessageBox.information(self, "Success", f"Registration successful. Your full username is:\n{full_username}\n\nUse this to log in.")
         else:
             QMessageBox.warning(self, "Error", resp.get('message', 'Unknown error'))
 
