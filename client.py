@@ -186,11 +186,11 @@ class ChatWidget(QWidget):
     
     def on_new_message(self, data):
         if self.chat_type == "private":
-            sender = data['from']
+            sender = data['from_username']   # was 'from'
             content = data['content']
             timestamp = data['timestamp']
-        else:
-            sender = data['from']
+        else:  # group
+            sender = data['from_username']   # was 'from'
             content = data['content']
             timestamp = data['timestamp']
         # Store locally
@@ -292,7 +292,7 @@ class MainWindow(QMainWindow):
                 data = msg['data']
                 conv_id = data['conversation_id']
                 msg_id = data['message_id']
-                sender = data['from']
+                sender = data['from_username']      # was 'from'
                 content = data['content']
                 timestamp = data['timestamp']
                 is_outgoing = (sender == self.username)
@@ -304,12 +304,11 @@ class MainWindow(QMainWindow):
                     self.chat_widgets[conv_id].on_new_message(data)
                 else:
                     if data['type'] == 'private':
-                        other = data['from']
+                        other = data['from_username']   # was 'from'
                         chat = ChatWidget(conv_id, other, "private",
                                         self.network, self.local_db, self.username,
                                         raw_target=other)
                         self.add_chat_tab(conv_id, other, chat, is_group=False)
-                        # Switch to private chats tab to notify user
                         self.main_tabs.setCurrentWidget(self.private_container)
                     else:  # group
                         group_id = data['group_id']
